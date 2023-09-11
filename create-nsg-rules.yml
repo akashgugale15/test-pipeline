@@ -1,0 +1,645 @@
+parameters:
+- name: environment
+  type: string
+  displayName: which environment do you want to create Infra?
+  default: D
+  values:
+  - D
+  - T
+  - A
+  - P
+
+jobs:
+- job: Query_Virtual_Network
+  displayName: Query Virtual Network
+  steps:
+  - template: query-network-objects/query_vnet.yml
+    parameters:
+      azureSubscription: $(AzureServiceConnection)
+      virtualNetworkName: $(VirtualNetworkName)
+            
+- job: Query_APPGW_Subnet
+  displayName: Query APPGW Subnet
+  dependsOn:
+  - Query_Virtual_Network
+  steps:
+  - template: query-network-objects/query_subnet.yml
+    parameters:
+      azureSubscription: $(AzureServiceConnection)
+      virtualNetworkName: $(VirtualNetworkName)
+      subnetName: $(AppGatewaySubnetName)
+
+- job: Query_PLE_Subnet
+  displayName: Query PLE Subnet
+  dependsOn:
+  - Query_APPGW_Subnet
+  steps:
+  - template: query-network-objects/query_subnet.yml
+    parameters:
+      azureSubscription: $(AzureServiceConnection)
+      virtualNetworkName: $(VirtualNetworkName)
+      subnetName: "ple01-subnet"
+
+- job: Query_JumpHost_Subnet
+  displayName: Query JumpHost Subnet
+  dependsOn:
+  - Query_PLE_Subnet
+  steps:
+  - template: query-network-objects/query_subnet.yml
+    parameters:
+      azureSubscription: $(AzureServiceConnection)
+      virtualNetworkName: $(VirtualNetworkName)
+      subnetName: "dev01-subnet"
+
+- job: Query_AKS_Subnet
+  displayName: Query AKS Subnet
+  dependsOn:
+  - Query_JumpHost_Subnet
+  steps:
+  - template: query-network-objects/query_subnet.yml
+    parameters:
+      azureSubscription: $(AzureServiceConnection)
+      virtualNetworkName: $(VirtualNetworkName)
+      subnetName: "aks01-subnet"
+
+###################################################################################
+- job: Create_NSG_From_APPGWSubnet_to_PLESubnet_Outbound
+  displayName: 'Create NSG From APPGWSubnet to PLESubnet Outbound'
+  dependsOn:
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: succeeded()
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_APPGW_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: '$(AppGatewaySubnetName)'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_outbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 102
+      destination_port: 443
+      description: 'Outbound rule from Application gateway subnet to PLE subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+- job: Create_NSG_From_APPGWSubnet_to_PLESubnet_Inbound
+  displayName: 'Create NSG From APPGWSubnet to PLESubnet Inbound'
+  dependsOn:
+  - Create_NSG_From_APPGWSubnet_to_PLESubnet_Outbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_APPGWSubnet_to_PLESubnet_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_APPGW_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: 'ple01-subnet'
+      direction: Inbound
+      protocol: TCP
+      source_ip_range_inbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_inbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 102
+      destination_port: 443
+      description: 'Inbound rule from Application gateway subnet to PLE subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+ ###################################################################################
+ 
+- job: Create_NSG_From_APPGWSubnet_to_AKSSubnet_Outbound
+  displayName: 'Create NSG From APPGWSubnet to AKSSubnet Outbound'
+  dependsOn:
+  - Create_NSG_From_APPGWSubnet_to_PLESubnet_Inbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_APPGWSubnet_to_PLESubnet_Inbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_APPGW_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: '$(AppGatewaySubnetName)'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_outbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 104
+      destination_port: 443
+      description: 'Outbound rule from Application gateway subnet to AKS subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+- job: Create_NSG_From_APPGWSubnet_to_AKSSubnet_Inbound
+  displayName: 'Create NSG From APPGWSubnet to AKSSubnet Inbound'
+  dependsOn:
+  - Create_NSG_From_APPGWSubnet_to_AKSSubnet_Outbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_APPGWSubnet_to_AKSSubnet_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_APPGW_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: 'aks01-subnet'
+      direction: Inbound
+      protocol: TCP
+      source_ip_range_inbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_inbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 104
+      destination_port: 443
+      description: 'Inbound rule from Application gateway subnet to AKS subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+
+ ###################################################################################
+ 
+- job: Create_NSG_From_AKSSubnet_to_PLESubnet_Outbound
+  displayName: 'Create NSG From AKSSubnet to PLESubnet Outbound'
+  dependsOn:
+  - Create_NSG_From_APPGWSubnet_to_AKSSubnet_Inbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_APPGWSubnet_to_AKSSubnet_Inbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: 'aks01-subnet'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_outbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 106
+      destination_port: '443,445,1433,1434,5671,5672'
+      description: 'Outbound rule from AKS subnet to PLE subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+- job: Create_NSG_From_AKSSubnet_to_PLESubnet_Inbound
+  displayName: 'Create NSG From AKSSubnet to PLESubnet Inbound'
+  dependsOn:
+  - Create_NSG_From_AKSSubnet_to_PLESubnet_Outbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_AKSSubnet_to_PLESubnet_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: 'ple01-subnet'
+      direction: Inbound
+      protocol: TCP
+      source_ip_range_inbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_inbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 106
+      destination_port: '443,445,1433,1434,5671,5672'
+      description: 'Inbound rule from AKS subnet to PLE subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+
+ ###################################################################################*********
+ 
+- job: Create_NSG_From_AKSSubnet_to_CSMSubnet_Outbound
+  displayName: 'Create NSG From AKSSubnet to CSMSubnet Outbound'
+  dependsOn:
+  - Create_NSG_From_AKSSubnet_to_PLESubnet_Inbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_AKSSubnet_to_PLESubnet_Inbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgVNETtoVNET
+      subnet_name: 'aks01-subnet'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      DestinationIPRangeVNETtoVNETOutbound: $(CSMAPISubnetIPRange)
+      destination_port: '443'
+      VirtualNetworkNameVNETtoVNET: $(CSMAPIVnetName)
+      SubnetNameVNETtoVNET: $(CSMAPISubnetName)
+      priority: 121
+      description: 'Outbound From AKS to CSM'
+      VirtualNetworkId: $(VNETResourceId)
+
+
+ ###################################################################################*****
+- job: Create_NSG_From_AKSSubnet_to_AZIAGSubnet_Outbound
+  displayName: 'Create NSG From AKSSubnet to AZIAGSubnet Outbound'
+  dependsOn:
+  - Create_NSG_From_AKSSubnet_to_CSMSubnet_Outbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_AKSSubnet_to_CSMSubnet_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgVNETtoVNET
+      subnet_name: 'aks01-subnet'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      DestinationIPRangeVNETtoVNETOutbound: $(AZIAGSubnetIPRange)
+      VirtualNetworkNameVNETtoVNET: $(AZIAGVNetName)
+      SubnetNameVNETtoVNET: $(AZIAGSubnetName)
+      priority: 122
+      destination_port: '443'
+      description: 'Outbound rule from AKS subnet to AZIAGSubnet subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+
+ ###################################################################################***
+- job: Create_NSG_From_AKSSubnet_to_Nexus_Outbound_1
+  displayName: 'Create NSG From AKSSubnet to Nexus Outbound 1'
+  dependsOn:
+  - Create_NSG_From_AKSSubnet_to_AZIAGSubnet_Outbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_AKSSubnet_to_AZIAGSubnet_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgSubnetToOnprem
+      subnet_name: 'aks01-subnet'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_onprem_outbound: '10.240.53.177/32'
+      priority: 123
+      destination_port: '443,18443,8443,18445'
+      description: 'Outbound rule from AKS subnet to Nexus repository 1'
+      VirtualNetworkId: $(VNETResourceId)
+
+- job: Create_NSG_From_AKSSubnet_to_Nexus_Outbound_2
+  displayName: 'Create NSG From AKSSubnet to Nexus Outbound 2'
+  dependsOn:
+  - Create_NSG_From_AKSSubnet_to_Nexus_Outbound_1
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_AKSSubnet_to_Nexus_Outbound_1.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgSubnetToOnprem
+      subnet_name: 'aks01-subnet'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_onprem_outbound: '10.240.5.119/32'
+      priority: 123
+      destination_port: '443,18443,8443,18445'
+      description: 'Outbound rule from AKS subnet to Nexus repository 2'
+      VirtualNetworkId: $(VNETResourceId)
+ ###################################################################################***
+- job: Create_NSG_From_AKSSubnet_to_OPIAG_Outbound
+  displayName: 'Create NSG From AKSSubnet to OPIAG Outbound'
+  dependsOn:
+  - Create_NSG_From_AKSSubnet_to_Nexus_Outbound_2
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_AKSSubnet_to_Nexus_Outbound_2.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgSubnetToOnprem
+      subnet_name: 'aks01-subnet'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_onprem_outbound: $(OPIAGIPAddress)
+      priority: 124
+      destination_port: '443'
+      description: 'Outbound rule from AKS subnet to OPIAG subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+
+  ###################################################################################***
+- job: Create_NSG_From_JumpHostSubnet_to_PLE_Outbound
+  displayName: 'Create NSG From JumpHostSubnet to PLE Outbound'
+  dependsOn:
+  - Create_NSG_From_AKSSubnet_to_OPIAG_Outbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  - Query_JumpHost_Subnet
+  condition: in(dependencies.Create_NSG_From_AKSSubnet_to_OPIAG_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_JumpHost_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: 'dev01-subnet'
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_outbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 106
+      destination_port: '5671,5672,443,445,1433,1434'
+      description: 'Outbound rule from JumpHostSubnet subnet to PLE subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+- job: Create_NSG_From_JumpHostSubnet_to_PLE_Inbound
+  displayName: 'Create NSG From JumpHostSubnet to PLE Inbound'
+  dependsOn:
+  - Create_NSG_From_JumpHostSubnet_to_PLE_Outbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  - Query_JumpHost_Subnet
+  condition: in(dependencies.Create_NSG_From_JumpHostSubnet_to_PLE_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_JumpHost_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: 'dev01-subnet'
+      direction: Inbound
+      protocol: TCP
+      source_ip_range_inbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_inbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 106
+      destination_port: '5671,5672,443,445,1433,1434'
+      description: 'Inbound rule from JumpHostSubnet subnet to PLE subnet'
+      VirtualNetworkId: $(VNETResourceId)
+
+ ###################################################################################
+ 
+- job: Create_NSG_From_JumpHostSubnet_to_Nexus_Outbound
+  displayName: 'Create NSG From JumpHostSubnet to Nexus Outbound'
+  dependsOn:
+  - Create_NSG_From_JumpHostSubnet_to_PLE_Inbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  - Query_JumpHost_Subnet
+  condition: in(dependencies.Create_NSG_From_JumpHostSubnet_to_PLE_Inbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    SourceSubnetAddressPrefix: $[dependencies.Query_JumpHost_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      subnet_name: 'dev01-subnet'
+      action: NewNsgSubnetToOnprem
+      direction: Outbound
+      protocol: TCP
+      source_ip_range_outbound: '$(SourceSubnetAddressPrefix)'
+      destination_ip_range_onprem_outbound: '10.240.53.177/32'
+      priority: 124
+      destination_port: '443,18443,8443,18445'
+      description: 'Outbound rule from AKS subnet to Nexus repository 1'
+      VirtualNetworkId: $(VNETResourceId)
+
+
+ ###################################################################################*****
+- job: Create_NSG_From_Private_CD_AgentPool_to_AKSSubnet_Inbound
+  displayName: 'Create NSG From Private CD AgentPool to AKSSubnet Inbound'
+  dependsOn:
+  - Create_NSG_From_JumpHostSubnet_to_Nexus_Outbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_JumpHostSubnet_to_Nexus_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    DestinationSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgVNETtoVNET
+      subnet_name: 'aks01-subnet'
+      direction: Inbound
+      protocol: TCP
+      SourceIPRangeInboundVNETToVNET: '$(PrivateAgentPoolCDSubnetIPRange)'
+      destination_ip_range_inbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 125
+      destination_port: '443,1433'
+      description: 'AKS cluster endpoint to run Karate test scripts'
+      VirtualNetworkId: $(VNETResourceId)
+      SourceVirtualNetworkNameVNETtoVNET: 'pipe01-p-vnet'
+      SourceSubnetNameVNETtoVNET: 'prd02-subnet'
+
+
+- job: Create_NSG_From_Private_CI_AgentPool_to_AKSSubnet_Inbound
+  displayName: 'Create NSG From Private CI AgentPool to AKSSubnet Inbound'
+  dependsOn:
+  - Create_NSG_From_Private_CD_AgentPool_to_AKSSubnet_Inbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_Private_CD_AgentPool_to_AKSSubnet_Inbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    DestinationSubnetAddressPrefix: $[dependencies.Query_AKS_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgVNETtoVNET
+      subnet_name: 'aks01-subnet'
+      direction: Inbound
+      protocol: TCP
+      SourceIPRangeInboundVNETToVNET: '$(PrivateAgentPoolCISubnetIPRange)'
+      destination_ip_range_inbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 126
+      destination_port: '443,1433'
+      description: 'AKS cluster endpoint to run Karate test scripts'
+      VirtualNetworkId: $(VNETResourceId)
+      SourceVirtualNetworkNameVNETtoVNET: 'pipe01-p-vnet'
+      SourceSubnetNameVNETtoVNET: 'prd01-subnet'
+ ###################################################################################*****
+
+- job: Create_NSG_to_connect_PLE_from_Desktop_laptop_onprem
+  displayName: 'Create_NSG_to_connect_PLE_from_Desktop_laptop_onprem'
+  dependsOn:
+  - Create_NSG_From_Private_CI_AgentPool_to_AKSSubnet_Inbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_Private_CI_AgentPool_to_AKSSubnet_Inbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgSubnetToOnprem
+      subnet_name: 'ple01-subnet'
+      direction: Inbound
+      protocol: TCP
+      source_ip_range_onprem_inbound: '10.16.0.0/16,10.17.0.0/16,10.20.0.0/16,10.21.0.0/16,10.22.0.0/16,10.23.0.0/16,10.24.0.0/16,10.25.0.0/16,10.26.0.0/16,10.27.0.0/16,10.28.0.0/16,10.29.0.0/16,10.32.0.0/16,10.33.0.0/16,10.34.0.0/16,10.35.0.0/16,10.38.0.0/16,10.39.0.0/16,10.41.0.0/16,10.42.0.0/16,10.43.0.0/16,10.44.0.0/16,10.45.0.0/16,10.46.0.0/16,10.47.0.0/16,10.48.0.0/16,10.49.0.0/16,10.52.0.0/16,10.53.0.0/16,10.54.0.0/16,10.55.0.0/16,10.56.0.0/16,10.57.0.0/16,10.58.0.0/16,10.59.0.0/16,10.60.0.0/16,10.61.0.0/16,10.81.0.0/16,10.116.0.0/16,10.121.0.0/16,10.123.0.0/16,10.126.0.0/16,10.131.0.0/16,10.133.0.0/16,10.240.0.0/16,10.244.0.0/16'
+      source_port: '*'
+      destination_ip_range_inbound: $(DestinationSubnetAddressPrefix)
+      destination_port: '443'
+      priority: 126
+      description: 'PLE from desktop and laptop onprem'
+      VirtualNetworkId: $(VNETResourceId)
+
+
+- job: Create_NSG_to_connect_PLE_from_XenDesktop
+  displayName: 'Create_NSG_to_connect_PLE_from_XenDesktop'
+  dependsOn:
+  - Create_NSG_to_connect_PLE_from_Desktop_laptop_onprem
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_to_connect_PLE_from_Desktop_laptop_onprem.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgSubnetToOnprem
+      subnet_name: 'ple01-subnet'
+      direction: Inbound
+      protocol: TCP
+      source_ip_range_onprem_inbound: '10.28.0.0/16,10.22.36.0/22,10.22.40.0/22,10.22.44.0/22,10.22.48.0/22,10.121.0.0/16,10.123.0.0/16,10.52.0.0/16,10.56.0.0/16,10.57.0.0/16,10.49.0.0/16,10.29.34.0/23,10.22.164.0/22,10.22.168.0/22,10.22.172.0/22,10.22.176.0/22'
+      source_port: '*'
+      destination_ip_range_inbound: $(DestinationSubnetAddressPrefix)
+      destination_port: '443'
+      priority: 127
+      description: 'PLE from desktop and laptop onprem'
+      VirtualNetworkId: $(VNETResourceId)
+ 
+ ###################################################################################*****
+- job: Create_NSG_From_Private_CD_AgentPool_to_PLESubnet_Inbound
+  displayName: 'Create NSG From Private CD AgentPool to PLESubnet Inbound'
+  dependsOn:
+  - Create_NSG_to_connect_PLE_from_XenDesktop
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_JumpHostSubnet_to_Nexus_Outbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgVNETtoVNET
+      subnet_name: 'ple01-subnet'
+      direction: Inbound
+      protocol: TCP
+      SourceIPRangeInboundVNETToVNET: '$(PrivateAgentPoolCDSubnetIPRange)'
+      destination_ip_range_inbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 127
+      destination_port: '18443,8443,18445,443,445,1433,1434,5671,5672'
+      description: 'PLE cluster endpoint to run Karate test scripts'
+      VirtualNetworkId: $(VNETResourceId)
+      SourceVirtualNetworkNameVNETtoVNET: 'pipe01-p-vnet'
+      SourceSubnetNameVNETtoVNET: 'prd02-subnet'
+
+
+- job: Create_NSG_From_Private_CI_AgentPool_to_PLESubnet_Inbound
+  displayName: 'Create NSG From Private CI AgentPool to PLESubnet Inbound'
+  dependsOn:
+  - Create_NSG_From_Private_CD_AgentPool_to_PLESubnet_Inbound
+  - Query_AKS_Subnet
+  - Query_APPGW_Subnet
+  - Query_PLE_Subnet
+  - Query_Virtual_Network
+  condition: in(dependencies.Create_NSG_From_Private_CD_AgentPool_to_PLESubnet_Inbound.result, 'Succeeded', 'Skipped', 'Failed')
+  variables:
+    DestinationSubnetAddressPrefix: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.subnetAddressPrefix']]
+    VNETResourceId: $[dependencies.Query_PLE_Subnet.outputs['querySubnet.vnetResourceId']]
+  steps:
+  - template: generic-templates/create-nsg.yml
+    parameters:
+      azure_subscription: $(AzureServiceConnection)
+      action: NewNsgVNETtoVNET
+      subnet_name: 'ple01-subnet'
+      direction: Inbound
+      protocol: TCP
+      SourceIPRangeInboundVNETToVNET: '$(PrivateAgentPoolCISubnetIPRange)'
+      destination_ip_range_inbound: '$(DestinationSubnetAddressPrefix)'
+      priority: 128
+      destination_port: '18443,8443,18445,443,445,1433,1434,5671,5672'
+      description: 'PLE cluster endpoint to run Karate test scripts'
+      VirtualNetworkId: $(VNETResourceId)
+      SourceVirtualNetworkNameVNETtoVNET: 'pipe01-p-vnet'
+      SourceSubnetNameVNETtoVNET: 'prd01-subnet'
+ 
